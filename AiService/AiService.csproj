@@ -1,0 +1,48 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AutoGen.AzureAIInference" Version="0.2.3" />
+    <PackageReference Include="Azure.AI.OpenAI" Version="2.1.0" />
+    <PackageReference Include="Azure.Core" Version="1.50.0" />
+    <PackageReference Include="DevExpress.Data" Version="25.1.5" />
+    <PackageReference Include="Docnet.Core" Version="2.6.0" />
+    <PackageReference Include="DocumentFormat.OpenXml" Version="3.3.0" />
+    <PackageReference Include="EvoPdf.PdfToText" Version="10.0.0" />
+    <PackageReference Include="EvoPdf.PdfToText.NetCore" Version="10.0.0" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR" Version="1.2.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="9.0.9" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.9" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="9.0.9" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="9.0.9">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="9.0.9" />
+    <PackageReference Include="Microsoft.ML" Version="4.0.2" />
+    <PackageReference Include="Microsoft.ML.Mkl.Components" Version="4.0.2" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.23.2" />
+    <PackageReference Include="Microsoft.ML.OnnxTransformer" Version="4.0.2" />
+    <PackageReference Include="Microsoft.Web.Administration" Version="11.1.0" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <PackageReference Include="NPOI" Version="2.7.5" />
+    <PackageReference Include="OpenAI" Version="2.5.0" />
+    <PackageReference Include="Oracle.EntityFrameworkCore" Version="9.23.90" />
+    <PackageReference Include="Oracle.ManagedDataAccess" Version="23.9.1" />
+    <PackageReference Include="Oracle.ManagedDataAccess.Core" Version="23.9.1" />
+    <PackageReference Include="PdfPig" Version="0.1.12" />
+    <PackageReference Include="Polly.Extensions.Http" Version="3.0.0" />
+    <PackageReference Include="QRCoder" Version="1.7.0" />
+    <PackageReference Include="SemanticChunker.NET" Version="1.1.0" />
+    <PackageReference Include="Serilog.AspNetCore" Version="9.0.0" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+    <PackageReference Include="Swashbuckle.AspNetCore.SwaggerUI" Version="9.0.6" />
+    <PackageReference Include="System.Numerics.Tensors" Version="9.0.10" />
+  </ItemGroup>
+
+</Project>

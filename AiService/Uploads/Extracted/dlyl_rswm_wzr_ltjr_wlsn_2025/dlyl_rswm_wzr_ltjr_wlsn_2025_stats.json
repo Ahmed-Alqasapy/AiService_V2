@@ -1,0 +1,66 @@
+{
+  "total_pages": 27,
+  "ocr_pages": 0,
+  "total_sections": 11,
+  "total_tables": 30,
+  "total_chunks": 364,
+  "table_chunks": 328,
+  "total_words": 3898,
+  "total_chars": 21908,
+  "avg_chunk_words": 52.6,
+  "doc_id": "d897c811c7d7",
+  "source_file": "C:\\D\\Hybird_Module\\Combined\\Working_improvements\\MOST_SUCCESS_AI_PROJECTS\\HY_TRY_CHUNK_COMP_MODEL\\Hybird_CHUNK_IMPROVE_COMP_MODEL\\AiService\\Uploads\\dlyl_rswm_wzr_ltjr_wlsn_2025.pdf",
+  "file_name": "dlyl_rswm_wzr_ltjr_wlsn_2025.pdf",
+  "file_ext": ".pdf",
+  "file_size_mb": 0.668,
+  "extraction_date": "2026-08-27T15:54:42",
+  "extractor_version": "universal-1.0",
+  "language": "arabic",
+  "language_confidence": 0.9977,
+  "elapsed_seconds": 2.93,
+  "max_tokens": 450,
+  "overlap_tokens": 60,
+  "backend": "pypdf",
+  "backends_tried": [
+    {
+      "name": "pymupdf",
+      "chars": 25405,
+      "corrupt": 105,
+      "healthy": 199,
+      "damage_ratio": 0.3454,
+      "seconds": 0.07
+    },
+    {
+      "name": "pypdf",
+      "chars": 23955,
+      "corrupt": 5,
+      "healthy": 239,
+      "damage_ratio": 0.0205,
+      "seconds": 0.53
+    }
+  ],
+  "ligature_damage_ratio": 0.0205,
+  "pymupdf_damage_ratio": 0.3454,
+  "reversed_pages_fixed": 0,
+  "ocr_embedded_images": 0,
+  "pdf_metadata": {
+    "format": "PDF 1.7",
+    "title": "",
+    "author": "abrar alqallaf",
+    "subject": "",
+    "keywords": "",
+    "creator": "Microsoft® Word LTSC",
+    "producer": "Microsoft® Word LTSC",
+    "creationDate": "D:20250521125042+03'00'",
+    "modDate": "D:20250521125042+03'00'",
+    "trapped": "",
+    "encryption": null
+  },
+  "text_layer_metrics": {
+    "arabic_chars": 15897,
+    "lam_alef_per_1k": 12.9,
+    "yaa_nun_per_1k": 3.08,
+    "suspect": 0.0
+  },
+  "text_layer_lossy": false
+}
