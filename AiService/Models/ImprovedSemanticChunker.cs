@@ -1,4 +1,4 @@
-﻿using AiService.Services;
+using AiService.Services;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Text;
@@ -14,9 +14,33 @@ namespace AiService.Models
         public int MaxLinesPerChunk { get; set; } = 120; // 80
         public int ForceBreakEveryLines { get; set; } = 200; // 120
         public int OverlapSentences { get; set; } = 3; // Increased from 2
+
+        /// <summary>
+        /// Hard ceiling on chunk size, in estimated tokens. Set to 0 to disable and
+        /// fall back to line counts alone.
+        /// 400 leaves headroom under multilingual-e5-large-instruct's 512-token limit
+        /// for the context header and for the estimator's own error margin.
+        /// </summary>
+        public int MaxTokensPerChunk { get; set; } = 400;
+
+        /// <summary>
+        /// Prepend "section › subsection" to each chunk's text. Without it the
+        /// section is metadata only -- it is not embedded and (because the Qdrant
+        /// payload omits it) never reaches the model either, so a retrieved chunk
+        /// arrives with no indication of what part of what document it came from.
+        /// </summary>
+        public bool IncludeContextHeader { get; set; } = true;
+
+        /// <summary>Target size of the overlap carried into the next chunk, in characters.</summary>
+        public int OverlapTargetChars { get; set; } = 320;
         public int VectorSize { get; set; } = 1024;
-        public int SemanticCheckInterval { get; set; } = 40;  //20
-        public int MinSemanticCheckLines { get; set; } = 50;  //25
+        // Lowered from 40/50. With MaxTokensPerChunk = 400 a buffer flushes at
+        // roughly 15 lines, so the old thresholds meant the semantic break could
+        // never fire at all -- the chunker had silently become purely token-driven.
+        // Note the trigger is (count >= Min && count % Interval == 0), so with
+        // 12/8 the first check lands at 16 lines, then every 8 after that.
+        public int SemanticCheckInterval { get; set; } = 8;   //40
+        public int MinSemanticCheckLines { get; set; } = 12;  //50
         public int BatchSize { get; set; } = 50;
         public bool EnableDeduplication { get; set; } = false;
         public double DuplicationThreshold { get; set; } = 0.92;
@@ -87,6 +111,16 @@ namespace AiService.Models
         private readonly HashSet<string> _seenChunkHashes;
         private readonly List<string> _preservedOrphans; // NEW: Track orphaned content
 
+        // Semantic checks call the embedding server. When that server is not
+        // reachable each attempt costs a full TCP timeout (measured: 21s to
+        // 10.21.2.143:8000). Checks now run every 8 lines rather than every 40,
+        // so without a breaker a single document could spend over half an hour
+        // timing out and look hung. After a few consecutive failures we stop
+        // asking for the rest of the run and fall back to token/line breaks.
+        private int _consecutiveSemanticFailures;
+        private bool _semanticChecksDisabled;
+        private const int MaxConsecutiveSemanticFailures = 3;
+
         public ImprovedSemanticChunker(
             HttpClient ollamaClient,
             ILogger<ImprovedSemanticChunker> logger,
@@ -95,6 +129,8 @@ namespace AiService.Models
         {
             _ollamaClient = factory.CreateClient();
             _ollamaClient.BaseAddress = new Uri("http://10.21.2.143:8000/");
+            // default is 100s; a chunking-time similarity probe is not worth that
+            _ollamaClient.Timeout = TimeSpan.FromSeconds(10);
             _logger = logger;
             _options = options ?? new ChunkingOptions_NEW();
             _embeddingCache = new Dictionary<string, float[]>();
@@ -279,6 +315,38 @@ namespace AiService.Models
                 // Add regular text line
                 bufferLines.Add(line);
 
+                // Token budget. This has to be checked BEFORE the line-count limits,
+                // because line counts are a poor proxy for size: measured on the real
+                // corpus with an XLM-R tokenizer, 120-line chunks came out at a median
+                // of ~1,700 and a maximum of 3,570 tokens. The embedding model
+                // (multilingual-e5-large-instruct) accepts 512, so everything past the
+                // first ~512 tokens of each chunk was being truncated away before it
+                // was ever embedded -- roughly 70% of the text was unsearchable.
+                if (_options.MaxTokensPerChunk > 0 &&
+                    EstimateTokens(string.Join("\n", bufferLines)) >= _options.MaxTokensPerChunk)
+                {
+                    int tokenBreak = _options.SmartSentenceBoundary
+                        ? FindSmartBreakPoint(bufferLines)
+                        : bufferLines.Count;
+
+                    var tokenFlushed = bufferLines.Take(tokenBreak).ToList();
+                    await FlushBufferAsync(tokenFlushed, currentPage, currentSection, chunks,
+                        bufferStartLine, currentLineNumber, "TOKEN_BUDGET", currentChunkType,
+                        currentSubSection, currentHierarchyLevel);
+
+                    var tokenRemaining = bufferLines.Skip(tokenBreak).ToList();
+                    bufferLines.Clear();
+                    // FlushBufferAsync appends the overlap to the list it is handed,
+                    // but that was a copy, so it never reached the live buffer. Carry
+                    // it across explicitly, otherwise consecutive chunks are strictly
+                    // adjacent and a sentence split across the seam loses its context.
+                    if (currentChunkType == "text")
+                        bufferLines.AddRange(CreateEnhancedOverlap(string.Join("\n", tokenFlushed)));
+                    bufferLines.AddRange(tokenRemaining);
+                    bufferStartLine = currentLineNumber - tokenRemaining.Count + 1;
+                    continue;
+                }
+
                 // Check for max lines
                 if (bufferLines.Count >= _options.MaxLinesPerChunk)
                 {
@@ -293,7 +361,11 @@ namespace AiService.Models
 
                     // Preserve remaining lines with context
                     var remaining = bufferLines.Skip(breakPoint).ToList();
+                    var flushedLines = bufferLines.Take(breakPoint).ToList();
                     bufferLines.Clear();
+                    // same overlap fix as the token-budget path above
+                    if (currentChunkType == "text")
+                        bufferLines.AddRange(CreateEnhancedOverlap(string.Join("\n", flushedLines)));
                     bufferLines.AddRange(remaining);
                     bufferStartLine = currentLineNumber - remaining.Count + 1;
                     continue;
@@ -311,7 +383,11 @@ namespace AiService.Models
                         currentSubSection, currentHierarchyLevel);
 
                     var remaining = bufferLines.Skip(breakPoint).ToList();
+                    var flushedLines = bufferLines.Take(breakPoint).ToList();
                     bufferLines.Clear();
+                    // same overlap fix as the token-budget path above
+                    if (currentChunkType == "text")
+                        bufferLines.AddRange(CreateEnhancedOverlap(string.Join("\n", flushedLines)));
                     bufferLines.AddRange(remaining);
                     bufferStartLine = currentLineNumber - remaining.Count + 1;
                     continue;
@@ -633,16 +709,21 @@ namespace AiService.Models
 
         private (bool isSection, int level, string cleanedTitle) DetectSectionWithLevel(string line)
         {
-            if (line.Length <= 12 || line.Length >= 250)
-                return (false, 0, "");
-
+            // A markdown heading is an explicit marker, so it is checked before the
+            // length heuristics. Previously the <=12 char guard ran first and threw
+            // away short but perfectly good headings such as "# الفهرس" (8 chars),
+            // which left whole documents with no detected sections at all.
             var hashMatch = Regex.Match(line, @"^(#{1,6})\s+(.+)");
             if (hashMatch.Success)
             {
                 int level = hashMatch.Groups[1].Value.Length;
                 string title = hashMatch.Groups[2].Value.Trim();
-                return (true, level, title);
+                if (title.Length > 0 && title.Length < 250)
+                    return (true, level, title);
             }
+
+            if (line.Length <= 12 || line.Length >= 250)
+                return (false, 0, "");
 
             var arabicChars = line.Count(c => c >= '\u0600' && c <= '\u06FF');
             if (arabicChars < line.Length * 0.5)
@@ -987,19 +1068,29 @@ namespace AiService.Models
                 return;
             }
 
+            // Give the chunk its own context. This goes into Text (not just metadata)
+            // for two reasons: it is what gets embedded, so "الرسوم" in the heading
+            // helps a fee question match a chunk whose body only lists numbers; and
+            // the Qdrant payload carries Text but not Section, so this is the only way
+            // the section reaches the model at answer time.
+            var embeddedText = _options.IncludeContextHeader
+                ? PrependContextHeader(text, currentSection, subSection)
+                : text;
+
             var chunk = new Chunk_NEW
             {
-                Text = text,
+                Text = embeddedText,
                 PageNumber = currentPage,
                 Section = currentSection,
                 SubSection = subSection,
                 HierarchyLevel = hierarchyLevel,
-                ApproxTokens = EstimateTokens(text),
+                // measured on what is actually embedded, header included
+                ApproxTokens = EstimateTokens(embeddedText),
                 StartLine = startLine,
                 EndLine = endLine,
                 ChunkId = $"chunk_{chunks.Count + 1}_{Guid.NewGuid():N}"[..32],
                 ChunkType = chunkType,
-                CharacterCount = text.Length
+                CharacterCount = embeddedText.Length
             };
 
             chunks.Add(chunk);
@@ -1028,35 +1119,87 @@ namespace AiService.Models
             return $"{normalized.Length}_{prefix.GetHashCode()}_{suffix.GetHashCode()}";
         }
 
-        // ENHANCED: Better overlap with more context
+        /// <summary>
+        /// Builds "section › subsection" and puts it on the first line of the chunk.
+        /// Skipped when the section is the placeholder, when it is already the first
+        /// line of the body (the heading line often sits in the buffer already), or
+        /// when it would be a large fraction of a very short chunk.
+        /// </summary>
+        private string PrependContextHeader(string body, string section, string subSection)
+        {
+            var parts = new List<string>();
+
+            if (!string.IsNullOrWhiteSpace(section) && section != "مقدمة")
+                parts.Add(section.Trim());
+
+            if (!string.IsNullOrWhiteSpace(subSection) &&
+                !string.Equals(subSection.Trim(), section?.Trim(), StringComparison.Ordinal))
+                parts.Add(subSection.Trim());
+
+            if (parts.Count == 0) return body;
+
+            var header = string.Join(" › ", parts);
+
+            // Do not repeat a heading the body already opens with.
+            var firstLine = body.Split('\n').FirstOrDefault()?.Trim() ?? "";
+            if (firstLine.Length > 0 &&
+                (firstLine.Equals(header, StringComparison.Ordinal) ||
+                 firstLine.Contains(parts[^1], StringComparison.Ordinal)))
+                return body;
+
+            return header + "\n\n" + body;
+        }
+
+        // Sentence terminators, including the Arabic question mark (U+061F) and the
+        // Arabic semicolon (U+061B), which the previous implementation missed.
+        private static readonly char[] SentenceEnders = { '.', '!', '?', '؟', '؛', '۔', ';' };
+
+        /// <summary>
+        /// Takes the tail of the chunk to carry into the next one, as a verbatim
+        /// slice of the original text.
+        ///
+        /// The previous version split on '.', dropped every fragment shorter than 15
+        /// characters, and rejoined the survivors with ". ". That rewrote the text:
+        /// decimals and abbreviations were broken apart, newlines and list structure
+        /// were lost, and short lines vanished. Its fallback,
+        /// text.Substring(text.Length - 150), also cut in the middle of a word.
+        /// </summary>
         private List<string> CreateEnhancedOverlap(string text)
         {
-            // Get last 3-5 sentences for better context
-            var sentences = text
-                .Split(new[] { '.', '!', '?', '۔', ';' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(s => s.Trim())
-                .Where(s => s.Length > 15)
-                .TakeLast(_options.OverlapSentences)
-                .ToList();
+            if (string.IsNullOrWhiteSpace(text)) return new List<string>();
 
-            if (!sentences.Any()) return new List<string>();
+            int target = Math.Max(80, _options.OverlapTargetChars);
+            if (text.Length <= target)
+                return new List<string> { text.Trim() };
 
-            var overlap = string.Join(". ", sentences);
+            // Start from the target window, then walk back to a sentence boundary if
+            // one is nearby, so the overlap begins at a natural point.
+            int start = text.Length - target;
 
-            // Ensure minimum character overlap
-            int minOverlapChars = 150;
-            if (overlap.Length < minOverlapChars && text.Length >= minOverlapChars)
+            int sentenceStart = -1;
+            int searchFloor = Math.Max(0, start - target / 2);
+            for (int i = start; i > searchFloor; i--)
             {
-                // Take last N characters instead
-                overlap = text.Substring(text.Length - minOverlapChars);
+                if (SentenceEnders.Contains(text[i]))
+                {
+                    sentenceStart = i + 1;
+                    break;
+                }
             }
 
-            // Cap maximum overlap
-            if (overlap.Length > 300)
+            if (sentenceStart > 0)
             {
-                var words = overlap.Split(' ');
-                overlap = string.Join(" ", words.TakeLast(40));
+                start = sentenceStart;
             }
+            else
+            {
+                // No sentence boundary: fall back to a word boundary so we never
+                // cut a word in half.
+                while (start > 0 && !char.IsWhiteSpace(text[start - 1])) start--;
+            }
+
+            var overlap = text.Substring(start).Trim();
+            if (overlap.Length < 40) return new List<string>();
 
             _logger.LogDebug($"Created overlap: {overlap.Length} chars");
 
@@ -1120,15 +1263,61 @@ namespace AiService.Models
             return deduplicated;
         }
 
+        /// <summary>All-zero vectors are the sentinel this class uses for a failed
+        /// embedding call, so they must never be fed into a similarity comparison.</summary>
+        private static bool IsDegenerate(float[][] embeddings)
+        {
+            int checkCount = Math.Min(embeddings.Length, 10);
+            for (int i = 0; i < checkCount; i++)
+            {
+                var v = embeddings[i];
+                if (v != null && v.Any(x => Math.Abs(x) > 1e-6f))
+                    return false;
+            }
+            return true;
+        }
+
+        private void RecordSemanticFailure(string reason)
+        {
+            _consecutiveSemanticFailures++;
+            if (_consecutiveSemanticFailures >= MaxConsecutiveSemanticFailures && !_semanticChecksDisabled)
+            {
+                _semanticChecksDisabled = true;
+                _logger.LogWarning(
+                    "Semantic break detection disabled for this run after {Count} failed embedding "
+                    + "calls ({Reason}); falling back to token and line boundaries.",
+                    _consecutiveSemanticFailures, reason);
+            }
+            else if (!_semanticChecksDisabled)
+            {
+                _logger.LogWarning($"Semantic check failed: {reason}");
+            }
+        }
+
         private async Task<bool> CheckSemanticBreakAsync(List<string> bufferLines)
         {
             try
             {
+                if (_semanticChecksDisabled) return false;
+
                 if (bufferLines.Count < _options.MinSemanticCheckLines)
                     return false;
 
                 var embeddings = await GetEmbeddingsBatchAsync(bufferLines);
                 if (embeddings == null || embeddings.Length < 10) return false;
+
+                // GetEmbeddingsBatchAsync swallows transport errors and returns zero
+                // vectors rather than throwing, so a dead embedding server does not
+                // reach the catch below. Two consequences had to be handled here:
+                // the circuit breaker never tripped, and -- worse -- the cosine
+                // similarity of two zero vectors is 0, which is under any sensible
+                // threshold, so every check reported a semantic break. A server
+                // outage was silently shredding documents at every check point.
+                if (IsDegenerate(embeddings))
+                {
+                    RecordSemanticFailure("embedding server returned empty vectors");
+                    return false;
+                }
 
                 var recent = embeddings.TakeLast(5).ToArray();
                 var previous = embeddings.SkipLast(5).TakeLast(5).ToArray();
@@ -1140,13 +1329,14 @@ namespace AiService.Models
 
                 float similarity = CosineSimilarity(recentAvg, previousAvg);
 
+                _consecutiveSemanticFailures = 0;
                 _logger.LogDebug($"Semantic check: {similarity:F3} (threshold: {_options.SemanticBreakThreshold})");
 
                 return similarity < _options.SemanticBreakThreshold;
             }
             catch (Exception ex)
             {
-                _logger.LogWarning($"Semantic check failed: {ex.Message}");
+                RecordSemanticFailure(ex.Message);
                 return false;
             }
         }

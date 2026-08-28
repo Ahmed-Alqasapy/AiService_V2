@@ -1,0 +1,66 @@
+{
+  "total_pages": 8,
+  "ocr_pages": 8,
+  "total_sections": 1,
+  "total_tables": 0,
+  "total_chunks": 9,
+  "table_chunks": 0,
+  "total_words": 1230,
+  "total_chars": 5530,
+  "avg_chunk_words": 139.6,
+  "doc_id": "4a18a19feec1",
+  "source_file": "C:\\D\\Hybird_Module\\Combined\\Working_improvements\\MOST_SUCCESS_AI_PROJECTS\\HY_TRY_CHUNK_COMP_MODEL\\Hybird_CHUNK_IMPROVE_COMP_MODEL\\AiService\\Uploads\\الإحصائية الشهرية للدار.pdf",
+  "file_name": "الإحصائية الشهرية للدار.pdf",
+  "file_ext": ".pdf",
+  "file_size_mb": 2.278,
+  "extraction_date": "2026-08-27T16:54:32",
+  "extractor_version": "universal-1.0",
+  "language": "arabic",
+  "language_confidence": 0.7642,
+  "elapsed_seconds": 715.74,
+  "max_tokens": 450,
+  "overlap_tokens": 60,
+  "backend": "pymupdf",
+  "backends_tried": [
+    {
+      "name": "pymupdf",
+      "chars": 7,
+      "corrupt": 0,
+      "healthy": 0,
+      "damage_ratio": 0.0,
+      "seconds": 0.0
+    },
+    {
+      "name": "pypdf",
+      "chars": 7,
+      "corrupt": 0,
+      "healthy": 0,
+      "damage_ratio": 0.0,
+      "seconds": 0.01
+    }
+  ],
+  "ligature_damage_ratio": 0.0,
+  "pymupdf_damage_ratio": 0.0,
+  "reversed_pages_fixed": 0,
+  "ocr_embedded_images": 0,
+  "pdf_metadata": {
+    "format": "PDF 1.3",
+    "title": "",
+    "author": "",
+    "subject": "",
+    "keywords": "",
+    "creator": "",
+    "producer": "TurboScan by Piksoft",
+    "creationDate": "",
+    "modDate": "",
+    "trapped": "",
+    "encryption": null
+  },
+  "text_layer_metrics": {
+    "arabic_chars": 0,
+    "lam_alef_per_1k": -1.0,
+    "yaa_nun_per_1k": -1.0,
+    "suspect": 0.0
+  },
+  "text_layer_lossy": false
+}

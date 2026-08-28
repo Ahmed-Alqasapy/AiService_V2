@@ -1939,7 +1939,32 @@ def save_outputs(doc: Document, out_dir: Path, write_jsonl: bool = False) -> Non
 
     # 1. flat text -- this is the file Extractor.cs reads today. Keeping it
     #    identical in name and location is what makes this a drop-in change.
+    #    The detected sections are written back as markdown headings. The C#
+    #    chunker (ImprovedSemanticChunker.DetectSectionWithLevel) recognises
+    #    "#"-prefixed lines, but its Arabic-only heuristics found headings in just
+    #    one of five documents. Emitting the headings this extractor already
+    #    detected lets it label chunks with their section in all of them -- which
+    #    is what puts the section into the embedded text.
     text_out = doc.full_text
+    if doc.sections and any(s.title.strip() for s in doc.sections):
+        parts: List[str] = []
+        for s in doc.sections:
+            title = (s.title or "").strip()
+            if title and title not in ("المحتوى", "Content"):
+                parts.append("#" * max(1, min(s.level, 6)) + " " + title)
+                parts.append("")
+            body = (s.content or "").strip()
+            if body:
+                parts.append(body)
+                parts.append("")
+        rebuilt = "\n".join(parts).strip()
+        # never let the restructure lose text
+        if len(rebuilt) >= len(doc.full_text) * 0.95:
+            text_out = rebuilt
+        else:
+            LOG.warning("  section rebuild lost text (%d -> %d chars); keeping flat text",
+                        len(doc.full_text), len(rebuilt))
+
     if doc.tables:
         parts = [text_out, "", "=" * 60, "الجداول المستخرجة" if doc.language != "english" else "EXTRACTED TABLES", "=" * 60]
         for t in doc.tables:

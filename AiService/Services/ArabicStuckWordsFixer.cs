@@ -1,4 +1,4 @@
-﻿using System.Text.RegularExpressions;
+using System.Text.RegularExpressions;
 
 namespace AiService.Services
 {
@@ -70,7 +70,9 @@ namespace AiService.Services
     { "بمالا", "بما لا" },
     { "بمافي", "بما في" },
     { "ممافي", "مما في" },
-    { "فيما", "في ما" },
+    // REMOVED: { "فيما", "في ما" } -- فيما is a valid single Arabic word
+    // (فيما بعد, فيما يتعلق). This entry corrupted correct text; it fired 7 times
+    // across the current corpus.
     { "عماإذا", "عما إذا" },
     { "إذاكان", "إذا كان" },
     { "علىأن", "على أن" },
@@ -117,6 +119,8 @@ namespace AiService.Services
     { "الرح من", "الرحمن" },
     { "الع المين", "العالمين" },
     { "الاتبياء", "الأنبياء" },
+    // CAUTION: correct only inside the religious phrase "وعلى آله وصحبه".
+    // آلة also means "machine" -- revisit if the corpus ever covers equipment.
     { "آلة", "آله" },
     { "الوظي فية", "الوظيفية" },
     { "الك ويتي", "الكويتي" },
@@ -125,13 +129,14 @@ namespace AiService.Services
     { "اخلاقيات", "أخلاقيات" },
     { "الوظيفى", "الوظيفي" },
     { "الط عن", "الطعن" },
-    { "قضائيا", "قضائيًا" },
+    // REMOVED: inserted a diacritic; extract_universal.py strips diacritics,
+    // so this reintroduced one and split identical words into two tokens.
     { "انهاء", "إنهاء" },
     { "الوظي في", "الوظيفي" },
     { "الموض وعات", "الموضوعات" },
     { "تو فير", "توفير" },
     { "الخد مات", "الخدمات" },
-    { "جل اهتمام", "جلّ اهتمام" },
+    // REMOVED: same reason -- inserts a shadda the extractor has stripped.
     { "الد ولية", "الدولية" },
     { "المت وسطة", "المتوسطة" },
     { "موظ فين", "موظفين" },
@@ -159,7 +164,8 @@ namespace AiService.Services
     { "او", "أو" },
     { "لسنه", "لسنة" },
     { "اربع", "أربع" },
-    { "الالية", "التالية" },
+    // REMOVED: الآلية ("the mechanism") is a real word; mapping it to التالية
+    // ("the following") replaces one word with an unrelated one.
     { "المنقول او", "المنقول أو" },
     { "الإضا فية", "الإضافية" },
     { "إعباء", "أعباء" },
@@ -173,7 +179,7 @@ namespace AiService.Services
     { "الاجنبية", "الأجنبية" },
     { "الج معيات", "الجمعيات" },
     { "التعا ونية", "التعاونية" },
-    { "الاليتين", "التاليتين" },
+    // REMOVED: same problem in the dual form.
     { "الاخ", "الأخ" },
 
     // === NEW ADDITIONS (from your latest list) ===
@@ -208,6 +214,14 @@ namespace AiService.Services
         /// </summary>
         /// <param name="text">Input Arabic text with possible OCR artifacts</param>
         /// <returns>Cleaned and corrected Arabic text</returns>
+        // NOTE: this walks the text once per dictionary entry, which looks wasteful.
+        // It was measured against a single compiled 167-way alternation over the real
+        // corpus, and the per-entry loop won at every size tested:
+        //     108 KB   ->  3 ms vs  16 ms
+        //     1.1 MB   -> 29 ms vs  72 ms
+        //     5.4 MB   -> 151 ms vs 362 ms
+        // Each small pattern gets a literal-prefix fast scan, whereas a giant
+        // alternation has to try alternatives at every position. Left as-is.
         public static string FixStuckWords(string text)
         {
             if (string.IsNullOrWhiteSpace(text))

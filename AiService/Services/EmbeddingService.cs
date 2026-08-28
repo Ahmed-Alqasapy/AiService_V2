@@ -109,10 +109,18 @@ namespace AiService.Services
             BaseAddress = new Uri("http://127.0.0.1:8000"),
             Timeout = TimeSpan.FromMinutes(10)   // ← 10 دقايق كافية أول مرة
         };
-        public EmbeddingService(IHttpClientFactory factory, MyDbContext db, ILogger<EmbeddingService> logger , ImprovedSemanticChunker semantic , AdvancedSemanticChunker advSemantic , ChunkingService chunkService)
+        public EmbeddingService(IHttpClientFactory factory, MyDbContext db, ILogger<EmbeddingService> logger , ImprovedSemanticChunker semantic , AdvancedSemanticChunker advSemantic , ChunkingService chunkService, IConfiguration? config = null)
         {
             _db = db;
             _logger = logger;
+
+            // Stage B switch. Off by default: indexing keeps re-chunking the flat
+            // _clean.txt with SemanticChunkAsync exactly as before. Turn it on in
+            // appsettings.json to index the chunks extract_universal.py already
+            // produced (heading paths, real page numbers, one chunk per table row).
+            // Switch UNIFIED_COLLECTION at the same time to compare side by side
+            // rather than mixing two chunkings in one collection.
+            _usePythonChunks = config?.GetValue<bool>("Extraction:UsePythonChunks") ?? false;
             _ollamaClient = factory.CreateClient();
             //_ollamaClient.BaseAddress = new Uri("http://localhost:11434/api/");
             //_ollamaClient.BaseAddress = new Uri("http://localhost:11434/api/");
@@ -1388,6 +1396,118 @@ namespace AiService.Services
         // ============================================================
 
         #region Embedding Data From Files
+
+        // ---- Stage B: consume the chunks extract_universal.py already produced ----
+
+        private readonly bool _usePythonChunks;
+
+        private static readonly JsonSerializerOptions PyChunkJsonOptions = new()
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+            PropertyNameCaseInsensitive = true
+        };
+
+        private sealed class PyChunk
+        {
+            public string ChunkId { get; set; } = "";
+            public string Content { get; set; } = "";
+            public PyChunkMeta Metadata { get; set; } = new();
+        }
+
+        private sealed class PyChunkMeta
+        {
+            public string SectionTitle { get; set; } = "";
+            public string Type { get; set; } = "";
+            public int PageStart { get; set; }
+            public int PageEnd { get; set; }
+            public int TokenEstimate { get; set; }
+            public int Level { get; set; }
+        }
+
+        /// <summary>
+        /// Reads &lt;dir&gt;/Extracted/&lt;stem&gt;/&lt;stem&gt;_chunks.json, written by the same
+        /// extractor run that produced _clean.txt. Returns null when the file is
+        /// missing or unreadable so the caller falls back to the existing chunker
+        /// rather than dropping the document.
+        /// </summary>
+        private List<Chunk_NEW>? LoadPythonChunks(string file)
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(Path.GetFullPath(file));
+                if (string.IsNullOrEmpty(dir)) return null;
+
+                var stem = Path.GetFileNameWithoutExtension(file);
+                var chunksPath = Path.Combine(dir, "Extracted", stem, stem + "_chunks.json");
+                if (!File.Exists(chunksPath))
+                {
+                    _logger.LogWarning("لم يتم العثور على ملف القطع: {Path} — سيتم استخدام المقسّم القديم", chunksPath);
+                    return null;
+                }
+
+                var json = File.ReadAllText(chunksPath);
+                var parsed = System.Text.Json.JsonSerializer.Deserialize<List<PyChunk>>(json, PyChunkJsonOptions);
+                if (parsed == null || parsed.Count == 0) return null;
+
+                var fileName = Path.GetFileName(file);
+                var mapped = parsed
+                    .Where(c => !string.IsNullOrWhiteSpace(c.Content))
+                    .Select(c => new Chunk_NEW
+                    {
+                        Text = c.Content,
+                        CharacterCount = c.Content.Length,
+                        file_name = fileName,
+                        Section = c.Metadata.SectionTitle,
+                        ChunkType = c.Metadata.Type,
+                        PageNumber = c.Metadata.PageStart,
+                        ApproxTokens = c.Metadata.TokenEstimate,
+                        HierarchyLevel = c.Metadata.Level,
+                        ChunkId = c.ChunkId
+                    })
+                    .ToList();
+
+                return mapped.Count > 0 ? mapped : null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "فشل قراءة قطع بايثون لـ {File} — سيتم استخدام المقسّم القديم", Path.GetFileName(file));
+                return null;
+            }
+        }
+
+        // File types extract_universal.py can read. Anything else is skipped rather
+        // than fed to the extension switch.
+        private static readonly HashSet<string> IndexableExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".pdf",
+            ".docx", ".docm", ".xlsx", ".xlsm", ".xls", ".pptx", ".pptm",
+            ".html", ".htm", ".txt", ".csv", ".tsv", ".rtf",
+            ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"
+        };
+
+        // Folders the extractor writes into. Without this the indexer walks its own
+        // output: pointing extract_universal.py at Uploads/ once found 458 "documents"
+        // in a folder holding seven real ones.
+        private static readonly HashSet<string> NonInputFolders = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "Extracted", ".ocr_cache"
+        };
+
+        private static bool IsIndexableInput(string path)
+        {
+            if (!IndexableExtensions.Contains(Path.GetExtension(path)))
+                return false;
+
+            var dir = Path.GetDirectoryName(Path.GetFullPath(path));
+            while (!string.IsNullOrEmpty(dir))
+            {
+                if (NonInputFolders.Contains(Path.GetFileName(dir)))
+                    return false;
+                dir = Path.GetDirectoryName(dir);
+            }
+            return true;
+        }
+
         public async Task IndexUploadedFilesAsync(string folderPath = "Uploads")
         {
 
@@ -1405,14 +1525,13 @@ namespace AiService.Services
             }
 
 
+                // Allowlist of things we can actually read, instead of a denylist of
+                // output extensions. The old denylist excluded .txt and .csv, so an
+                // uploaded text file was never indexed at all; and it did not exclude
+                // .jsonl, so any new output extension would slip through into the
+                // extension switch below and throw.
                 var files = Directory.EnumerateFiles(folderPath, "*.*", SearchOption.AllDirectories)
-         .Where(f =>
-             !f.EndsWith(".md", StringComparison.OrdinalIgnoreCase) &&
-             !f.EndsWith(".json", StringComparison.OrdinalIgnoreCase) &&
-             !f.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) &&
-             !f.EndsWith(".txt" , StringComparison.OrdinalIgnoreCase) &&
-             !f.EndsWith(".csv" , StringComparison.OrdinalIgnoreCase)
-             )
+         .Where(f => IsIndexableInput(f))
          .ToArray();
 
 
@@ -1448,14 +1567,57 @@ namespace AiService.Services
 
             foreach (var file in newFiles)
             {
-                string fullText = Path.GetExtension(file).ToLower() switch
+                // Every format now goes through extract_universal.py, so DOCX/XLSX/PPTX
+                // get the same Arabic ligature handling, OCR of embedded images and
+                // table extraction that PDFs get.
+                //
+                // The old C# paths this replaces were not equivalent:
+                //   ExtractDocxText   called Docnet (a PDFium wrapper) on a .docx, so it
+                //                     always threw and returned "" -- DOCX silently
+                //                     produced no text at all.
+                //   ExtractExcelText  concatenated every cell space-separated with no
+                //                     row or column structure.
+                // The switch also had no default arm, so any other extension threw
+                // SwitchExpressionException at runtime.
+                string ext = Path.GetExtension(file).ToLowerInvariant();
+                string fullText = ext switch
                 {
-                    ".pdf" or ".png" => await Extractor.ExtractAllText(file),
-                    ".docx" => Extractor.ExtractDocxText(file),
-                    ".xlsx" or ".xls" => Extractor.ExtractExcelText(file),
-                    ".pptx" => Extractor.ExtractPptxTextWithPages(file)
-                    //_ => File.ReadAllText(file)
+                    // PDFs and images keep ExtractAllText, which adds the existing
+                    // text-layer check and re-run fallback around the same script.
+                    ".pdf" or ".png" or ".jpg" or ".jpeg" or ".tif" or ".tiff"
+                        or ".bmp" or ".webp"
+                        => await Extractor.ExtractAllText(file),
+
+                    ".docx" or ".docm" or ".xlsx" or ".xlsm" or ".xls"
+                        or ".pptx" or ".pptm" or ".html" or ".htm"
+                        or ".txt" or ".csv" or ".tsv" or ".rtf"
+                        => await Extractor.ExtractWithYourCurrentExtractPy_Claude(file),
+
+                    _ => string.Empty
                 };
+
+                if (string.IsNullOrWhiteSpace(fullText))
+                {
+                    _logger.LogWarning("تم تخطي الملف (لا يوجد نص مستخرج): {File}", Path.GetFileName(file));
+                    continue;
+                }
+
+                // Stage B: use the extractor's own chunks when enabled. Falls through
+                // to the existing chunker if the file is missing, so a partial or
+                // failed extraction degrades instead of losing the document.
+                if (_usePythonChunks)
+                {
+                    var pyChunks = LoadPythonChunks(file);
+                    if (pyChunks != null)
+                    {
+                        allChunks.AddRange(pyChunks);
+                        _logger.LogInformation(
+                            "تم استخدام قطع بايثون لـ {File}: {Count} قطعة ({Tables} صف جدول)",
+                            Path.GetFileName(file), pyChunks.Count,
+                            pyChunks.Count(c => c.ChunkType == "table_row"));
+                        continue;
+                    }
+                }
 
                 //var chunksList = await TryAgenticChunking(fullText, Path.GetFileName(file));
                 //if (chunksList == null || chunksList.Count < 3)
