@@ -1,8 +1,8 @@
 # Speech-to-Text API — UI integration guide
 
 How the chat voice button turns the user's speech into a question. The API transcribes
-Arabic audio with the **arabic_speech_to_text** model (wav2vec2-xls-r-300m), served from
-`AiService`. Companion to `TTS_API.md` (reading answers out loud).
+Arabic audio with the **whisper-large-v3-turbo-arabic-dialectal** model (Whisper fine-tuned
+on multi-dialect Arabic), served from `AiService`. Companion to `TTS_API.md` (reading answers out loud).
 
 ## Flow
 
@@ -62,15 +62,15 @@ Limits:
 Response `200`:
 ```json
 {
-  "text": "كم رسوم اصدار الترخيص",
-  "duration": 2.2,
-  "seconds": 0.63
+  "text": "ما هي خطوات تأسيس شركة الشخص الواحدة؟",
+  "duration": 3.27,
+  "seconds": 6.31
 }
 ```
 
 | Field | Meaning |
 |---|---|
-| `text` | Transcribed Arabic text, no punctuation or diacritics. |
+| `text` | Transcribed Arabic text without diacritics. **May include punctuation** such as `؟` `،` `.`. |
 | `duration` | Length of the recording in seconds. |
 | `seconds` | Time the server spent transcribing. |
 
@@ -82,8 +82,8 @@ Errors (all JSON with an `error` field unless noted):
 | `400` | `{ "error": "could not decode audio: ..." }` | Not a readable audio file. |
 | `400` | validation problem (`errors.file`) | Form field not named `file`. Fix in the UI code. |
 | `413` | `{ "error": "audio is 125s; max 120s" }` | Too long. Stop recording automatically at 120 s (see example). An upload over 15 MB may return `413` with no body. |
-| `422` | `{ "error": "No speech was recognized.", "duration": 2 }` | Silence or noise. Show "لم يتم التعرف على الكلام، حاول مرة أخرى". Don't send anything to chat. |
-| `503` | `{ "error": "Speech-to-text service is unavailable." }` | Model still loading (first ~15–50 s after API start) or crashed. The API restarts it automatically on the next request; show a message and let the user retry. |
+| `422` | `{ "error": "No speech was recognized.", "duration": 2 }` | Silent recording. Show "لم يتم التعرف على الكلام، حاول مرة أخرى". Don't send anything to chat. **Background noise does not give 422** — see "Accuracy". |
+| `503` | `{ "error": "Speech-to-text service is unavailable." }` | Model still loading (first ~15–30 s after API start) or crashed. The API restarts it automatically on the next request; show a message and let the user retry. |
 
 ---
 
@@ -91,28 +91,35 @@ Errors (all JSON with an `error` field unless noted):
 
 | Situation | Time |
 |---|---|
-| Normal request, 2–5 s of speech | ~0.5–5 s on CPU |
-| 30 s of speech | ~6 s |
+| Normal request, 2–5 s of speech | ~6–9 s on CPU |
+| 35 s of speech | ~19 s |
 | First request after the speech server crashed | ~15 s extra (auto-restart) |
 
-Show a "جارٍ تحويل الصوت إلى نص…" indicator and disable the mic button while waiting.
-Use a client timeout of at least 60 s.
+Measured on the development machine's CPU while memory was tight; a quieter machine may be
+faster. Show a "جارٍ تحويل الصوت إلى نص…" indicator and disable the mic button while waiting.
+Use a client timeout of at least 120 s.
 
 ---
 
 ## Accuracy
 
-The model's published word error rate is **22%**, so expect spelling mistakes.
+The model's published word error rate is **34%** on a multi-dialect test set, so expect
+mistakes, especially wrong word endings.
 Measured examples:
 
 | Said | Returned |
 |---|---|
-| ما هي خطوات تأسيس شركة الشخص الواحد | ما هي خطوات تأسيص الشركة الشخص الواحد |
-| كم الحد الأدنى لرأس المال | كم الحظ الأضمى لرأس المالح |
-| كيف أستخرج السجل التجاري من بوابة مركز الكويت للأعمال | كيف ستخرج اسجل التجاري من بوابة مركز الكوايت للأعمال |
+| ما هي خطوات تأسيس شركة الشخص الواحد | ما هي خطوات تأسيس شركة الشخص الواحدة؟ |
+| كم الحد الأدنى لرأس المال | كمل حد الأضنى لرأسي المالي؟ |
+| كيف أستخرج السجل التجاري من بوابة مركز الكويت للأعمال | كيف استخرج السجل التجارية من بوابتي مركز الكويت للأعمال؟ |
+| كم رسوم إصدار الترخيص | كم رسوم من إصدارة ترخيصة؟ |
 
 These were measured with synthetic (TTS) speech; real microphone results are still to be
 confirmed.
+
+**Noise produces invented text.** Like other Whisper models, it can return a short phrase for
+background noise (3 s of noise came back as `إيه ده!`) instead of a `422`. Another reason to
+let the user see the text before it is sent.
 
 **Recommendation:** put the text in the chat input and let the user review or edit it, then
 send with the normal send button. Don't auto-send to `ChatWithRAG`, because a misheard question
@@ -201,8 +208,8 @@ multipart boundary.
 | Starts / restarts the Python server | `AiService/Services/PythonServerLauncher.cs` (`SttServerLauncher`) |
 | Model server (port 8011) | `AiService/stt_server.py`, log: `AiService/stt_server.log` |
 | Settings | `appsettings.json` → `Stt` (`BaseUrl`, `AutoStart`, `PythonPath`, `ModelDir`) |
-| Model | `C:\Work\PROJECTS\speechToText\arabic_speech_to_text` |
+| Model | `C:\Work\PROJECTS\WASFYSPEECH\whisper-large-v3-turbo-arabic-dialectal` |
 
-The Python server starts with the API and keeps the model in memory (loading takes ~48 s),
-so requests don't pay the load cost. Persian `ی` in the output is converted to Arabic `ي`
+The Python server starts with the API and keeps the model in memory (loads in ~12 s, uses
+~3.6 GB of RAM), so requests don't pay the load cost. Persian `ی` in the output is converted to Arabic `ي`
 so it matches the indexed documents.

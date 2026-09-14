@@ -148,7 +148,7 @@ namespace AiService
             builder.Services.AddSingleton<TtsServerLauncher>();
             builder.Services.AddHostedService(sp => sp.GetRequiredService<TtsServerLauncher>());
 
-            // Speech-to-text: stt_server.py (arabic_speech_to_text) for the chat voice button
+            // Speech-to-text: stt_server.py (whisper-large-v3-turbo-arabic-dialectal) for the chat voice button
             builder.Services.AddHttpClient<SttService>(client =>
             {
                 client.BaseAddress = new Uri(builder.Configuration["Stt:BaseUrl"] ?? "http://127.0.0.1:8011/");

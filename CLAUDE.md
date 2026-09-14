@@ -40,17 +40,28 @@ payload, which is why the chunker puts the section into `Text` itself.
 UI flow: voice button records -> `POST /api/Chat/Transcribe` (multipart `file`) -> `{text}` into
 chat box -> `POST /api/Chat/ChatWithRAG` -> optional `SpeakPrepare` for audio.
 
-- `stt_server.py` (port 8011, `Stt` section in appsettings): wav2vec2-xls-r-300m CTC from
-  `C:\Work\PROJECTS\speechToText\arabic_speech_to_text`. Model load ~48 s, so it is a
-  persistent server, not per-request Python. PyAV decodes webm/opus (no ffmpeg.exe needed).
-  Max 120 s, decoded in 30 s windows, Persian `ی` -> `ي`. Log: `stt_server.log`.
+- `stt_server.py` (port 8011, `Stt` section in appsettings): Whisper fine-tune
+  `C:\Work\PROJECTS\WASFYSPEECH\whisper-large-v3-turbo-arabic-dialectal` (809M, card WER 0.344).
+  Replaced wav2vec2 `arabic_speech_to_text` (folder deleted) on 2026-09-14. Persistent server;
+  PyAV decodes webm/opus (no ffmpeg.exe). Max 120 s; >30 s uses Whisper long-form with
+  timestamps. Output cleaned like the model's `normalize.py` (no tashkil/tags) + `ی`->`ي`.
+  Log: `stt_server.log`. `STT_DTYPE=bfloat16` env is supported but unmeasured.
+- The model was saved by transformers 5.13; this machine has 4.57.3 (shared with Surya OCR and
+  TTS, so not upgraded). Two load-time workarounds in `stt_server.py`: `extra_special_tokens={}`
+  (list-vs-dict crash) and `eos_token_id` list -> int (long-form "slice indices" crash).
+- Measured (CPU, with the old STT server still holding 2.7 GB): load 12 s, **3.6 GB RAM**,
+  2–5 s clips take 6–9 s, 35 s of 10 sentences took 18.6 s and came back complete.
+  Clearly better than wav2vec2 (`تأسيس`, `الكويت`, `استخرج` now right) but still adds
+  endings: `الواحد`->`الواحدة؟`, `الترخيص`->`ترخيصة`, `المال`->`المالي`. Adds `؟`.
+- Whisper hallucinates on noise: 3 s white noise -> `إيه ده!`. The RMS gate only catches
+  silence. `<|nospeech|>` prob is 0.000 for speech and noise alike (fine-tune lost it), so it
+  cannot be used as a filter. 9 identical repeated sentences collapsed to 3 (Whisper habit).
 - `tts_server.py` (port 8010, `Tts` section): Nabra-7M-Distill.
 - Both launched by `Services/PythonServerLauncher.cs` (base class; `TtsServerLauncher`,
   `SttServerLauncher`), started with the API and restarted on demand by `SttService`/`TtsService`.
-- Measured round-trip (TTS voice -> STT): meaning survives but spelling errors are common,
-  e.g. `الحد الأدنى` -> `الحظ الأضمى`, `تأسيس` -> `تأسيص`, `الكويت` -> `الكوايت`. Model card
-  WER 22%. Not yet tested on real human microphone recordings.
-- Endpoint verified through the API: wav and `audio/webm;codecs=opus` -> 200; bad data 400;
+- All accuracy numbers use TTS-generated speech; not yet tested on real microphone recordings.
+- Endpoint verified through the API (with the wav2vec2 model; the Whisper server was tested
+  directly on port 8012, not through the API yet): wav and `audio/webm;codecs=opus` -> 200; bad data 400;
   empty 400; silence 422 (RMS gate + <2-letter results dropped, CTC emitted `ة` on silence);
   125 s -> 413; killed STT server restarted on the next request (~16 s). Fixed on the way:
   `MediaTypeHeaderValue` ctor threw on `;codecs=opus` (500), and the launcher never closed its

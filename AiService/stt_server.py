@@ -1,20 +1,23 @@
-"""Arabic speech-to-text server for the chat voice button (wav2vec2-xls-r-300m CTC).
+"""Arabic speech-to-text server for the chat voice button.
 
-The model loads once and stays in memory: loading takes ~48 s on this CPU, while a
-30 s recording then transcribes in ~6 s.
+Model: whisper-large-v3-turbo-arabic-dialectal (809M, fine-tuned on multi-dialect Arabic,
+model card WER 0.344 / CER 0.115). The model loads once and stays in memory.
 
     python stt_server.py                              # http://127.0.0.1:8011
     POST /transcribe  multipart "file" (webm/ogg/wav/mp3/m4a...) -> {"text": ...}
     GET  /health
 
 Env:
-    STT_MODEL_DIR   model folder (default C:\\Work\\PROJECTS\\speechToText\\arabic_speech_to_text)
+    STT_MODEL_DIR   model folder (default C:\\Work\\PROJECTS\\WASFYSPEECH\\whisper-large-v3-turbo-arabic-dialectal)
     STT_PORT        default 8011
+    STT_DTYPE       float32 (default) or bfloat16 (half the RAM on CPU)
 """
 import io
 import os
+import re
 import threading
 import time
+import unicodedata
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -23,20 +26,41 @@ import av  # noqa: E402  PyAV decodes browser MediaRecorder output (webm/opus) w
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from fastapi import FastAPI, File, HTTPException, UploadFile  # noqa: E402
-from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor  # noqa: E402
+from transformers import WhisperForConditionalGeneration, WhisperProcessor  # noqa: E402
 
-MODEL_DIR = os.environ.get("STT_MODEL_DIR", r"C:\Work\PROJECTS\speechToText\arabic_speech_to_text")
+MODEL_DIR = os.environ.get(
+    "STT_MODEL_DIR", r"C:\Work\PROJECTS\WASFYSPEECH\whisper-large-v3-turbo-arabic-dialectal")
+DTYPE = {"float32": torch.float32, "bfloat16": torch.bfloat16}[os.environ.get("STT_DTYPE", "float32")]
 SAMPLE_RATE = 16000
 MAX_SECONDS = 120          # a chat question, not a lecture
-WINDOW_SECONDS = 30        # attention cost grows with length; decode long audio in windows
 MAX_BYTES = 15 * 1024 * 1024
+WHISPER_WINDOW = 30 * SAMPLE_RATE
 
-processor = Wav2Vec2Processor.from_pretrained(MODEL_DIR)
-model = Wav2Vec2ForCTC.from_pretrained(MODEL_DIR).eval()
+# The model was saved by transformers 5.x, which writes extra_special_tokens as a list;
+# 4.57 (installed here, shared with Surya OCR and the TTS server) expects a dict and
+# crashes. Those tokens are Whisper's standard ones and are already in tokenizer.json,
+# so dropping the field loads identical ids (<|ar|>=50272, <|transcribe|>=50360).
+processor = WhisperProcessor.from_pretrained(MODEL_DIR, extra_special_tokens={})
+model = WhisperForConditionalGeneration.from_pretrained(
+    MODEL_DIR, dtype=DTYPE, low_cpu_mem_usage=True).eval()
+# Also saved by 5.x: eos_token_id is [50257]. 4.57's timestamp processor (used for audio
+# over 30 s) slices with it and fails with "slice indices must be integers".
+if isinstance(model.generation_config.eos_token_id, list):
+    model.generation_config.eos_token_id = model.generation_config.eos_token_id[0]
 _lock = threading.Lock()
 
-# The vocab contains Persian yeh (ی); it never matches ي in the indexed documents.
+# Same cleaning the model was trained and scored with (normalize.py in the model folder):
+# no tashkil/tatweel, no [laughter]-style tags. Persian yeh/kaf -> Arabic so the text
+# matches the indexed documents.
+_DIACRITICS_RE = re.compile("[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E8\u06EA-\u06ED\u0640]")
+_TAG_RE = re.compile(r"\[[^\]]*\]|<[^>]*>")
 _PERSIAN_TO_ARABIC = str.maketrans({"\u06CC": "\u064A", "\u06A9": "\u0643"})
+
+
+def clean(text: str) -> str:
+    text = unicodedata.normalize("NFC", text)
+    text = _DIACRITICS_RE.sub("", _TAG_RE.sub(" ", text)).translate(_PERSIAN_TO_ARABIC)
+    return " ".join(text.split())
 
 
 def decode_audio(data: bytes) -> np.ndarray:
@@ -59,20 +83,18 @@ def decode_audio(data: bytes) -> np.ndarray:
 
 
 def transcribe(audio: np.ndarray) -> str:
-    step = WINDOW_SECONDS * SAMPLE_RATE
-    parts = []
+    if len(audio) <= WHISPER_WINDOW:
+        inputs = processor(audio, sampling_rate=SAMPLE_RATE, return_tensors="pt")
+        kwargs = {}
+    else:
+        # Whisper sees 30 s at a time; long-form generation slides over the audio using
+        # timestamps instead of cutting words at fixed 30 s boundaries.
+        inputs = processor(audio, sampling_rate=SAMPLE_RATE, return_tensors="pt",
+                           truncation=False, padding="longest", return_attention_mask=True)
+        kwargs = {"attention_mask": inputs.attention_mask, "return_timestamps": True}
     with _lock, torch.inference_mode():
-        for start in range(0, len(audio), step):
-            window = audio[start:start + step]
-            if len(window) < SAMPLE_RATE // 4:      # <0.25 s tail: nothing to say
-                continue
-            inputs = processor(window, sampling_rate=SAMPLE_RATE, return_tensors="pt")
-            logits = model(inputs.input_values).logits
-            parts.append(processor.batch_decode(logits.argmax(-1))[0])
-    text = " ".join(p.strip() for p in parts if p.strip())
-    text = " ".join(text.translate(_PERSIAN_TO_ARABIC).split())
-    # CTC on silence or noise emits a stray letter (2 s of silence gave "ة").
-    return text if len(text.replace(" ", "")) >= 2 else ""
+        ids = model.generate(inputs.input_features.to(DTYPE), language="ar", task="transcribe", **kwargs)
+    return clean(processor.batch_decode(ids, skip_special_tokens=True)[0])
 
 
 transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))  # warm-up
@@ -100,10 +122,15 @@ async def transcribe_endpoint(file: UploadFile = File(...)):
     if duration > MAX_SECONDS:
         raise HTTPException(413, f"audio is {duration:.0f}s; max {MAX_SECONDS}s")
     t = time.time()
-    # near-silent recording (button pressed, nothing said): skip the model
+    # Near-silent recording (button pressed, nothing said): skip the model. Whisper
+    # invents sentences on silence. Background noise still gets through (3 s of white
+    # noise came back as "إيه ده!"), and <|nospeech|> can't catch it: the fine-tune scores
+    # 0.000 for speech and noise alike.
     if float(np.sqrt(np.mean(audio ** 2))) < 1e-3:
         return {"text": "", "duration": round(duration, 2), "seconds": 0.0}
     text = transcribe(audio)
+    if len(text.replace(" ", "")) < 2:
+        text = ""
     return {"text": text, "duration": round(duration, 2), "seconds": round(time.time() - t, 2)}
 
 

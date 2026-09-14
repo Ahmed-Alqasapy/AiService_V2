@@ -6,7 +6,7 @@ namespace AiService.Services
     public record SttResult(string Text, double Duration, double Seconds);
 
     /// <summary>
-    /// Calls stt_server.py (arabic_speech_to_text). Sends the recorded audio as-is; the server
+    /// Calls stt_server.py (whisper-large-v3-turbo-arabic-dialectal). Sends the recorded audio as-is; the server
     /// decodes webm/ogg/wav/mp3 itself. If the server isn't reachable, asks SttServerLauncher to
     /// start it and retries once.
     /// </summary>

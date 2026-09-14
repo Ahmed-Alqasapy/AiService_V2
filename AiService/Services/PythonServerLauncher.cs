@@ -184,7 +184,7 @@ namespace AiService.Services
         protected override string ModelDirEnvVar => "NABRA_DIR";
     }
 
-    /// <summary>stt_server.py (arabic_speech_to_text, wav2vec2 CTC).</summary>
+    /// <summary>stt_server.py (whisper-large-v3-turbo-arabic-dialectal).</summary>
     public class SttServerLauncher : PythonServerLauncher
     {
         public SttServerLauncher(IConfiguration config, IWebHostEnvironment env, ILogger<SttServerLauncher> logger)
