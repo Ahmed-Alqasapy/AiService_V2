@@ -17,7 +17,61 @@ namespace AiService
 {
     public class Program
     {
-        
+        // Swagger UI embeds this in a JSON string inside a JS string literal, which eats one level
+        // of escaping, and a failure there stops the whole Swagger page from rendering. So: no
+        // backslashes (a regex /\/api/ became //api, a comment), no double quotes, no // comments,
+        // and it is sent as one line (raw newlines made JSON.parse throw).
+        private const string SwaggerTtsAutoplayJs = """
+            (res) => {
+              try {
+                const url = String(res.url || '');
+                if (!res.ok || url.toLowerCase().indexOf('/api/chat/chatwithrag') < 0) return res;
+                const body = res.obj || JSON.parse(res.text || res.data || '{}');
+                const text = body && body.message;
+                if (!text) return res;
+
+                let bar = document.getElementById('tts-bar');
+                if (!bar) {
+                  bar = document.createElement('div');
+                  bar.id = 'tts-bar';
+                  bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:9999;display:flex;gap:12px;align-items:center;padding:8px 16px;background:#1b1b1b;color:#fff;font:14px sans-serif';
+                  const s = document.createElement('span');
+                  s.id = 'tts-status';
+                  s.textContent = 'TTS';
+                  const a = document.createElement('audio');
+                  a.id = 'tts-audio';
+                  a.controls = true;
+                  a.style.flex = '1';
+                  bar.appendChild(s);
+                  bar.appendChild(a);
+                  document.body.appendChild(bar);
+                }
+                const status = document.getElementById('tts-status');
+                const audio = document.getElementById('tts-audio');
+                status.textContent = 'Generating speech…';
+
+                fetch(url.slice(0, url.toLowerCase().indexOf('chatwithrag')) + 'SpeakPrepare', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ text })
+                })
+                  .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t || ('HTTP ' + r.status)); }))
+                  .then(j => {
+                    audio.src = new URL(j.audioUrl, url).href;
+                    status.textContent = 'Playing';
+                    return audio.play().catch(e => {
+                      console.warn('TTS autoplay blocked', e);
+                      status.textContent = 'Press play ▶ (' + e.name + ')';
+                    });
+                  })
+                  .catch(e => { status.textContent = 'TTS failed: ' + e.message; });
+                audio.onerror = () => { status.textContent = 'TTS audio failed to load'; };
+              } catch (e) { console.error('TTS interceptor', e); }
+              return res;
+            }
+            """;
+
+
         public static async Task Main(string[] args)
         {
             var builder = WebApplication.CreateBuilder(args);
@@ -84,6 +138,24 @@ namespace AiService
 
 
             builder.Services.AddScoped<GPTService>();
+
+            // Text-to-speech: tts_server.py (Nabra-7M-Distill)
+            builder.Services.AddHttpClient<TtsService>(client =>
+            {
+                client.BaseAddress = new Uri(builder.Configuration["Tts:BaseUrl"] ?? "http://127.0.0.1:8010/");
+                client.Timeout = TimeSpan.FromMinutes(2);
+            });
+            builder.Services.AddSingleton<TtsServerLauncher>();
+            builder.Services.AddHostedService(sp => sp.GetRequiredService<TtsServerLauncher>());
+
+            // Speech-to-text: stt_server.py (arabic_speech_to_text) for the chat voice button
+            builder.Services.AddHttpClient<SttService>(client =>
+            {
+                client.BaseAddress = new Uri(builder.Configuration["Stt:BaseUrl"] ?? "http://127.0.0.1:8011/");
+                client.Timeout = TimeSpan.FromMinutes(2);
+            });
+            builder.Services.AddSingleton<SttServerLauncher>();
+            builder.Services.AddHostedService(sp => sp.GetRequiredService<SttServerLauncher>());
 
             //Semantic Search Service
 
@@ -153,7 +225,12 @@ namespace AiService
             if (app.Environment.IsDevelopment())
                 {
                     app.UseSwagger();
-                    app.UseSwaggerUI();
+                    app.UseSwaggerUI(c =>
+                    {
+                        // After ChatWithRAG answers, send the reply to Speak and play it.
+                        // A player bar stays at the bottom for replay, or in case the browser blocks autoplay.
+                        c.UseResponseInterceptor(SwaggerTtsAutoplayJs.ReplaceLineEndings(" "));
+                    });
                 }
 
 

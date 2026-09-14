@@ -289,6 +289,10 @@ def normalize_for_match(s: str) -> str:
 # ==========================================================================
 # DATA MODEL
 # ==========================================================================
+# Persian yeh / kaf -> Arabic yaa / kaf
+PERSIAN_TO_ARABIC = str.maketrans({"ی": "ي", "ک": "ك"})
+
+
 @dataclass
 class Page:
     """One unit of source content. PDFs -> pages, pptx -> slides, xlsx -> sheets."""
@@ -704,13 +708,35 @@ class PdfExtractor:
         self.ocr_on_lossy = ocr_on_lossy
         self.verify_lossy = verify_lossy
 
-    def _probe_lossy(self, doc, best: BackendResult) -> Dict[str, Any]:
+    @staticmethod
+    def _scanned_page_xref(page, min_cover: float = 0.85) -> Optional[int]:
+        """Return the scan's image xref if this page is a scan with a hidden OCR layer.
+
+        Scanner software lays invisible text (render mode 3) over a full-page
+        image. That text is usually poor, and the image would otherwise be
+        OCR'd again as an "embedded image" and appended -- the page twice.
+        Normal PDFs have visible text, so they never match.
+        """
+        try:
+            spans = page.get_texttrace()
+            if not spans or any(s.get("type") != 3 for s in spans):
+                return None
+            area = page.rect.width * page.rect.height
+            for info in page.get_images(full=True):
+                for r in page.get_image_rects(info[0]):
+                    if area and r.width * r.height / area >= min_cover:
+                        return info[0]
+        except Exception:
+            return None
+        return None
+
+    def _probe_lossy(self, doc, best: BackendResult, skip=frozenset()) -> Dict[str, Any]:
         """Confirm a suspected lossy CMap by OCR-ing the densest page.
 
         The cheap frequency test can be fooled by short or unusual documents,
         so we only spend one OCR page on it, and only when that test fires.
         """
-        text = "\n".join(best.pages)
+        text = "\n".join(t for i, t in enumerate(best.pages) if i not in skip)
         score = lossy_cmap_score(text)
         result: Dict[str, Any] = {"text_layer_metrics": score, "text_layer_lossy": False}
         if not score.get("suspect"):
@@ -739,7 +765,12 @@ class PdfExtractor:
         doc = open_pdf(path)
         try:
             best, all_results = PdfTextBackends.choose(path, doc)
-            lossy = self._probe_lossy(doc, best)
+            scanned = {i for i in range(len(doc)) if self._scanned_page_xref(doc[i]) is not None}
+            if scanned:
+                LOG.info("  %d scanned page(s) with a hidden OCR layer: %s",
+                         len(scanned), sorted(i + 1 for i in scanned))
+            # the hidden layer's errors are OCR errors, not a lossy font
+            lossy = self._probe_lossy(doc, best, skip=scanned)
             force_ocr_all = False
             if lossy.get("text_layer_lossy"):
                 m = lossy["text_layer_metrics"]
@@ -762,6 +793,17 @@ class PdfExtractor:
             for i in range(len(doc)):
                 raw = best.pages[i] if i < len(best.pages) else ""
                 source = "text"
+
+                # Scan + hidden OCR layer: read the scan with Surya and use that
+                # INSTEAD of the hidden layer. Keep the layer only if OCR is off
+                # or returns nothing.
+                if i in scanned and self.ocr_enabled:
+                    ocr_text, n = self._ocr_embedded_images(doc, i)
+                    if ocr_text.strip():
+                        pages.append(Page(number=i + 1, text=ocr_text,
+                                          source="ocr-scan", ocr_images=n))
+                        ocr_count += 1
+                        continue
 
                 if looks_reversed(raw):
                     raw = reverse_visual_arabic(raw)
@@ -1811,6 +1853,18 @@ class UniversalExtractor:
         full_text = "\n\n".join(p.text for p in pages).strip()
         language, confidence = detect_language(full_text)
         LOG.info("  language: %s (%.0f%%)", language, confidence * 100)
+
+        # OCR reads Arabic yaa/kaf as their Persian look-alikes (ی ک), which
+        # never match ي ك at search time. Only for Arabic documents, so real
+        # Persian/Urdu text is left alone.
+        if language in ("arabic", "mixed"):
+            for p in pages:
+                p.text = p.text.translate(PERSIAN_TO_ARABIC)
+            for t in tables:
+                t.headers = [h.translate(PERSIAN_TO_ARABIC) for h in t.headers]
+                t.rows = [[c.translate(PERSIAN_TO_ARABIC) for c in r] for r in t.rows]
+                t.caption = t.caption.translate(PERSIAN_TO_ARABIC)
+            full_text = full_text.translate(PERSIAN_TO_ARABIC)
 
         sections = SectionDetector(backend_meta.get("toc")).detect(pages, language)
         if not sections:
