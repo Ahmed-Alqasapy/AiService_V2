@@ -33,9 +33,10 @@ namespace AiService.Controllers
                 if (file.Length == 0) continue;
 
                 // اسم فريد + اسم الملف الأصلي
-                var fileName = $"{Path.GetFileName(file.FileName)}";
+                var fileName = SanitizeFileName(file.FileName);
+                if (fileName == null)
+                    return BadRequest(new { error = $"اسم الملف غير صالح: {file.FileName}" });
 
-                
                 var filePath = Path.Combine(_uploadFolder, fileName);
 
                 await using var stream = System.IO.File.Create(filePath);
@@ -54,6 +55,22 @@ namespace AiService.Controllers
                 files = savedFiles,
                 folder = _uploadFolder
             });
+        }
+
+        /// <summary>
+        /// Windows silently strips trailing spaces and dots from folder names. The extractor
+        /// writes to Uploads/Extracted/&lt;name without extension&gt;/, so "دار الرعاية .txt" got a
+        /// folder "دار الرعاية" while every path still said "دار الرعاية " and extraction failed
+        /// with "No such file or directory". Trimming here keeps the saved file, the Extracted
+        /// folder, _clean.txt and file_name in Qdrant all on the same name.
+        /// Returns null when nothing usable is left.
+        /// </summary>
+        private static string? SanitizeFileName(string rawName)
+        {
+            var name = Path.GetFileName(rawName ?? "");
+            var stem = Path.GetFileNameWithoutExtension(name).Trim().TrimEnd('.', ' ');
+            var ext = Path.GetExtension(name).Trim();
+            return stem.Length == 0 ? null : stem + ext;
         }
     }
 }
