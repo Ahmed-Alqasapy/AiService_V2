@@ -1550,8 +1550,10 @@ namespace AiService.Services
             var existingFileNames = await GetExistingFileNamesAsync(); // implement this to query DB
             var newFiles = files.Where(f => !existingFileNames.Contains(Path.GetFileName(f))).ToArray();
 
-
-
+            // Admin dashboard bookkeeping: files already in Qdrant are re-uploads, mark
+            // them Skipped instead of leaving them unrecorded.
+            foreach (var skipped in files.Except(newFiles))
+                await UpsertIndexedFileStatusAsync(Path.GetFileName(skipped), "Skipped");
 
             if (!newFiles.Any())
             {
@@ -1563,10 +1565,16 @@ namespace AiService.Services
 
            var allChunks = new List<Chunk_NEW>();
             //var allChunks = new List<Chunk_HY>();
-
+            var fileTimers = new Dictionary<string, Stopwatch>();
 
             foreach (var file in newFiles)
             {
+                var fileName = Path.GetFileName(file);
+                fileTimers[fileName] = Stopwatch.StartNew();
+                long? fileSize = null;
+                try { fileSize = new FileInfo(file).Length; } catch { }
+                await UpsertIndexedFileStatusAsync(fileName, "Indexing", fileSize: fileSize);
+
                 // Every format now goes through extract_universal.py, so DOCX/XLSX/PPTX
                 // get the same Arabic ligature handling, OCR of embedded images and
                 // table extraction that PDFs get.
@@ -1599,6 +1607,9 @@ namespace AiService.Services
                 if (string.IsNullOrWhiteSpace(fullText))
                 {
                     _logger.LogWarning("تم تخطي الملف (لا يوجد نص مستخرج): {File}", Path.GetFileName(file));
+                    await UpsertIndexedFileStatusAsync(fileName, "Failed",
+                        durationMs: fileTimers[fileName].ElapsedMilliseconds,
+                        error: "لا يوجد نص مستخرج من الملف");
                     continue;
                 }
 
@@ -1854,8 +1865,66 @@ namespace AiService.Services
                 });
             }
 
-            await UpsertBatchAsync(points);
-            _logger.LogInformation("تم فهرسة {Count} قطعة من الملفات بنجاح", points.Count);
+            try
+            {
+                await UpsertBatchAsync(points);
+                _logger.LogInformation("تم فهرسة {Count} قطعة من الملفات بنجاح", points.Count);
+
+                // Admin dashboard: mark every file that made it into this batch as Indexed,
+                // with its chunk/page count. Chunks were tagged with file_name as they were
+                // built above, so grouping here needs no change to the embedding/upsert path.
+                foreach (var group in allChunks.GroupBy(c => c.file_name))
+                {
+                    var elapsedMs = fileTimers.TryGetValue(group.Key, out var sw) ? sw.ElapsedMilliseconds : (long?)null;
+                    var pageCount = group.Select(c => c.PageNumber).Where(p => p > 0).Distinct().Count();
+                    await UpsertIndexedFileStatusAsync(group.Key, "Indexed",
+                        chunkCount: group.Count(), pageCount: pageCount, durationMs: elapsedMs);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Whole-batch upsert failed: every file that reached indexing in this run
+                // is unaccounted for in Qdrant, so mark them Failed rather than leaving them
+                // stuck on "Indexing".
+                foreach (var kv in fileTimers)
+                    await UpsertIndexedFileStatusAsync(kv.Key, "Failed",
+                        durationMs: kv.Value.ElapsedMilliseconds, error: ex.Message);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Admin dashboard bookkeeping for AI_INDEXED_FILE. Find-or-create by file name and
+        /// update status/counters. Never throws -- a logging failure must not break indexing.
+        /// </summary>
+        private async Task UpsertIndexedFileStatusAsync(string fileName, string status,
+            long? fileSize = null, int? chunkCount = null, int? pageCount = null,
+            long? durationMs = null, string? error = null, string? uploadedBy = null)
+        {
+            try
+            {
+                var row = await _db.AiIndexedFiles.FirstOrDefaultAsync(f => f.FileName == fileName);
+                if (row == null)
+                {
+                    row = new AiIndexedFile { FileName = fileName, Status = status, UploadedOn = DateTime.Now };
+                    _db.AiIndexedFiles.Add(row);
+                }
+                row.Status = status;
+                if (fileSize.HasValue) row.FileSize = fileSize;
+                if (chunkCount.HasValue) row.ChunkCount = chunkCount;
+                if (pageCount.HasValue) row.PageCount = pageCount;
+                if (durationMs.HasValue) row.DurationMs = durationMs;
+                if (uploadedBy != null) row.UploadedBy = uploadedBy;
+                row.ErrorMsg = error;
+                row.Collection = UNIFIED_COLLECTION;
+                if (status == "Indexed") row.IndexedOn = DateTime.Now;
+
+                await _db.SaveChangesAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to record AI_INDEXED_FILE status for {File}", fileName);
+            }
         }
         
 
@@ -2324,6 +2393,68 @@ namespace AiService.Services
 
             return fileNames;
         }
+
+        #region AI Admin Dashboard queries
+        /// <summary>Chunk count per uploaded file (source_type="file"), used by /api/admin/files.</summary>
+        public async Task<Dictionary<string, long>> GetFileChunkCountsAsync()
+        {
+            var counts = new Dictionary<string, long>();
+            int batchSize = 1000;
+            int offset = 0;
+            bool hasMore = true;
+
+            while (hasMore)
+            {
+                var payload = new
+                {
+                    limit = batchSize,
+                    offset,
+                    with_payload = new { include = new[] { "file_name" } },
+                    with_vector = false,
+                    filter = new { must = new object[] { new { key = "source_type", match = new { value = "file" } } } }
+                };
+
+                var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+                var response = await _qdrantClient.PostAsync($"/collections/{UNIFIED_COLLECTION}/points/scroll", content);
+                response.EnsureSuccessStatusCode();
+
+                var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                var points = json.RootElement.GetProperty("result").GetProperty("points");
+                if (points.GetArrayLength() == 0) break;
+
+                foreach (var point in points.EnumerateArray())
+                {
+                    if (point.TryGetProperty("payload", out var payloadProp) &&
+                        payloadProp.TryGetProperty("file_name", out var fn))
+                    {
+                        var name = fn.GetString() ?? "";
+                        counts[name] = counts.GetValueOrDefault(name) + 1;
+                    }
+                }
+
+                offset += batchSize;
+                hasMore = points.GetArrayLength() == batchSize;
+            }
+
+            return counts;
+        }
+
+        /// <summary>Total points for a given source_type ("file" or "db"), used by /api/admin/summary.</summary>
+        public async Task<long> CountBySourceTypeAsync(string sourceType)
+        {
+            var payload = new
+            {
+                filter = new { must = new object[] { new { key = "source_type", match = new { value = sourceType } } } },
+                exact = true
+            };
+            var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+            var response = await _qdrantClient.PostAsync($"/collections/{UNIFIED_COLLECTION}/points/count", content);
+            response.EnsureSuccessStatusCode();
+
+            var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            return json.RootElement.GetProperty("result").GetProperty("count").GetInt64();
+        }
+        #endregion
         #endregion
 
 

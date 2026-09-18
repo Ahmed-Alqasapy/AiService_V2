@@ -1,6 +1,8 @@
 ﻿// Controllers/FileUploadController.cs
+using AiService.Models;
 using AiService.Services;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace AiService.Controllers
 {
@@ -9,19 +11,21 @@ namespace AiService.Controllers
     public class FileUploadController : ControllerBase
     {
         private readonly EmbeddingService _embeddingService;
+        private readonly MyDbContext _db;
         private readonly ILogger<FileUploadController> _logger;
         private readonly string _uploadFolder = "Uploads";
 
-        public FileUploadController(EmbeddingService embeddingService, ILogger<FileUploadController> logger)
+        public FileUploadController(EmbeddingService embeddingService, MyDbContext db, ILogger<FileUploadController> logger)
         {
             _embeddingService = embeddingService;
+            _db = db;
             _logger = logger;
             Directory.CreateDirectory(_uploadFolder); // ينشئ المجلد لو ما كان موجود
         }
 
         // هذا الـ endpoint اللي تبي تستخدمه لرفع الملفات
         [HttpPost("upload")]
-        public async Task<IActionResult> Upload(List<IFormFile> files)
+        public async Task<IActionResult> Upload(List<IFormFile> files, [FromForm] string? uploadedBy = null)
         {
             if (files == null || !files.Any())
                 return BadRequest(new { error = "لا توجد ملفات للرفع" });
@@ -44,6 +48,11 @@ namespace AiService.Controllers
 
                 savedFiles.Add(fileName);
                 _logger.LogInformation("تم حفظ الملف: {FilePath}", filePath);
+
+                // Admin dashboard: record the file the moment it lands on disk, before
+                // indexing starts, so it shows up as "Queued" even if indexing is slow
+                // or the process restarts before EmbeddingService gets to it.
+                await RecordQueuedAsync(fileName, file.Length, uploadedBy);
             }
 
             // **الخطوة المهمة: فهرسة الملفات فورًا في Qdrant**
@@ -71,6 +80,30 @@ namespace AiService.Controllers
             var stem = Path.GetFileNameWithoutExtension(name).Trim().TrimEnd('.', ' ');
             var ext = Path.GetExtension(name).Trim();
             return stem.Length == 0 ? null : stem + ext;
+        }
+
+        private async Task RecordQueuedAsync(string fileName, long fileSize, string? uploadedBy)
+        {
+            try
+            {
+                var row = await _db.AiIndexedFiles.FirstOrDefaultAsync(f => f.FileName == fileName);
+                if (row == null)
+                {
+                    _db.AiIndexedFiles.Add(new AiIndexedFile
+                    {
+                        FileName = fileName,
+                        FileSize = fileSize,
+                        UploadedBy = uploadedBy,
+                        UploadedOn = DateTime.Now,
+                        Status = "Queued"
+                    });
+                    await _db.SaveChangesAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to record queued status for {File}", fileName);
+            }
         }
     }
 }

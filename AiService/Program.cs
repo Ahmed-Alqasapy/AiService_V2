@@ -123,6 +123,14 @@ namespace AiService
 
             builder.Services.AddScoped<EmbeddingService>();
 
+            // AI Admin Dashboard: per-request trace object, background chat-log writer,
+            // cost calculation and the admin API key gate. See AI_Admin_Dashboard_API_Plan.md.
+            builder.Services.AddScoped<AiService.Models.ChatTrace>();
+            builder.Services.AddSingleton<ChatLogQueue>();
+            builder.Services.AddSingleton<CostCalculator>();
+            builder.Services.AddHostedService<ChatLogWriter>();
+            builder.Services.AddScoped<AiService.Filters.AdminApiKeyFilter>();
+
 
 
 

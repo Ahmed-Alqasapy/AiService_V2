@@ -73,17 +73,17 @@ namespace AiService.Controllers
 
             var content = lang == "ar"
                 ? $"""
-       🌟 *مرحبًا مجددًا يا {nameToUse}* 🌟
+        مرحبًا مجددًا يا {nameToUse} 
 
-       لديك رخصة برقم:
-       **{user.OwnerLicense}**
+       لديك رخصة برقم :
+       {user.OwnerLicense}
 
        {greeting}! كيف يمكنني مساعدتك اليوم؟
        """
                 : $"""
        Hello {nameToUse}! 
 
-       You have an active license: **{user.OwnerLicense}**
+       You have an active license: {user.OwnerLicense}
 
        Good {(hour < 12 ? "morning" : "evening")}! How can I assist you today?
        """;

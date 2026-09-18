@@ -28,15 +28,17 @@ namespace AiService.Services
         private readonly string _model;
 
         private readonly ChatCompletionsClient  _Client_AZURE ;
+        private readonly AiService.Models.ChatTrace _trace;
 
 
 
 
-
-        public OpenAIService(HttpClient httpClient, IConfiguration configuration, ILogger<OpenAIService> logger)
+        public OpenAIService(HttpClient httpClient, IConfiguration configuration, ILogger<OpenAIService> logger,
+            AiService.Models.ChatTrace trace)
         {
             _httpClient = httpClient;
             _logger = logger;
+            _trace = trace;
             _apiKey = configuration["OpenAI:ApiKey"] ?? throw new ArgumentNullException("OpenAI API key is missing.");
             _modelName = "llama3.1:8b-instruct-q8_0";
             //_modelName = "qwen3:8b";
@@ -695,6 +697,7 @@ namespace AiService.Services
             using var lease = await _rateLimiter.AcquireAsync(permitCount: 1);
             if (!lease.IsAcquired)
             {
+                _trace.Status = "RateLimited";
                 return "عذراً، النظام مشغول حالياً. يرجى المحاولة بعد قليل.";
             }
 
@@ -747,6 +750,11 @@ namespace AiService.Services
                 Debug.WriteLine($"Output Tokens: {outputTokens}");
                 Debug.WriteLine($"Total Tokens : {totalTokens}");
 
+                _trace.Model = _model;
+                _trace.InputTokens += inputTokens;
+                _trace.OutputTokens += outputTokens;
+                _trace.LlmMs += stopwatch.ElapsedMilliseconds;
+
                 string answer = result.Choices.FirstOrDefault()?.Message?.Content?.Trim();
 
                 return string.IsNullOrWhiteSpace(answer)
@@ -755,15 +763,20 @@ namespace AiService.Services
             }
             catch (RequestFailedException ex) when (ex.Status == 429)
             {
+                _trace.Status = "RateLimited";
                 return "عذراً، تم تجاوز الحد المسموح من الطلبات. يرجى المحاولة مرة أخرى بعد قليل.";
             }
             catch (RequestFailedException ex)
             {
+                _trace.Status = "Error";
+                _trace.Error = $"{ex.Status}: {ex.Message}";
                 Debug.WriteLine($"Azure OpenAI Error: {ex.Status} - {ex.Message}");
                 return "عذراً، حدث خطأ في معالجة طلبك. يرجى المحاولة مرة أخرى.";
             }
             catch (Exception ex)
             {
+                _trace.Status = "Error";
+                _trace.Error = ex.Message;
                 Debug.WriteLine($"Exception in GenerateAnswer: {ex.Message}");
                 return "عذراً، حدث خطأ في الاتصال بالخدمة. يرجى المحاولة مرة أخرى.";
             }

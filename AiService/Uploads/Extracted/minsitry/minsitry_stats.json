@@ -1,0 +1,66 @@
+{
+  "total_pages": 6,
+  "ocr_pages": 6,
+  "total_sections": 3,
+  "total_tables": 0,
+  "total_chunks": 10,
+  "table_chunks": 0,
+  "total_words": 912,
+  "total_chars": 5294,
+  "avg_chunk_words": 99.4,
+  "doc_id": "0aa7ec919f65",
+  "source_file": "C:\\D\\Hybird_Module\\Combined\\Working_improvements\\MOST_SUCCESS_AI_PROJECTS\\HY_TRY_CHUNK_COMP_MODEL\\Hybird_CHUNK_IMPROVE_COMP_MODEL\\AiService\\Uploads\\minsitry.pdf",
+  "file_name": "minsitry.pdf",
+  "file_ext": ".pdf",
+  "file_size_mb": 14.945,
+  "extraction_date": "2026-09-18T12:48:44",
+  "extractor_version": "universal-1.0",
+  "language": "arabic",
+  "language_confidence": 0.9904,
+  "elapsed_seconds": 238.63,
+  "max_tokens": 450,
+  "overlap_tokens": 60,
+  "backend": "pymupdf",
+  "backends_tried": [
+    {
+      "name": "pymupdf",
+      "chars": 5,
+      "corrupt": 0,
+      "healthy": 0,
+      "damage_ratio": 0.0,
+      "seconds": 0.15
+    },
+    {
+      "name": "pypdf",
+      "chars": 5,
+      "corrupt": 0,
+      "healthy": 0,
+      "damage_ratio": 0.0,
+      "seconds": 3.95
+    }
+  ],
+  "ligature_damage_ratio": 0.0,
+  "pymupdf_damage_ratio": 0.0,
+  "reversed_pages_fixed": 0,
+  "ocr_embedded_images": 0,
+  "pdf_metadata": {
+    "format": "PDF 1.5",
+    "title": "minsitry of Commerce & Industry",
+    "author": "",
+    "subject": "",
+    "keywords": "",
+    "creator": "Adobe Illustrator CS5",
+    "producer": "Adobe PDF library 9.90",
+    "creationDate": "D:20251116153111+03'00'",
+    "modDate": "D:20251116154623+03'00'",
+    "trapped": "",
+    "encryption": null
+  },
+  "text_layer_metrics": {
+    "arabic_chars": 0,
+    "lam_alef_per_1k": -1.0,
+    "yaa_nun_per_1k": -1.0,
+    "suspect": 0.0
+  },
+  "text_layer_lossy": false
+}

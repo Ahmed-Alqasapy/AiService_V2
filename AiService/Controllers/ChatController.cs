@@ -14,15 +14,19 @@ namespace AiService.Controllers
     public class ChatController : ControllerBase
     {
         private readonly OpenAIService _openAIService;
+        private readonly ChatTrace _trace;
+        private readonly ChatLogQueue _chatLogQueue;
 
 
         public readonly GPTService _gptService;
         public ChatController(OpenAIService openAIService
-              , GPTService gPTService)
+              , GPTService gPTService, ChatTrace trace, ChatLogQueue chatLogQueue)
         {
             _openAIService = openAIService;
 
             _gptService = gPTService;
+            _trace = trace;
+            _chatLogQueue = chatLogQueue;
         }
 
         [HttpPost("ChatWithRAG")]
@@ -36,11 +40,17 @@ namespace AiService.Controllers
                 return BadRequest(new { error = "Message cannot be empty." });
             }
 
+            _trace.Question = message.Text;
+            _trace.UserId = message.UserId;
+            _trace.Channel = string.IsNullOrWhiteSpace(message.Channel) ? "text" : message.Channel;
+            var sw = Stopwatch.StartNew();
+
             try
             {
 
                 // Use the updated GenerateResponseAsync method from the service
                 string response = await _gptService.ProcessMessage(message.Text);
+                _trace.Answer = response;
 
                 if (string.IsNullOrWhiteSpace(response))
                 {
@@ -56,7 +66,14 @@ namespace AiService.Controllers
             }
             catch (Exception ex)
             {
+                _trace.Status = "Error";
+                _trace.Error = ex.Message;
                 return StatusCode(500, new { error = "An error occurred.", details = ex.Message });
+            }
+            finally
+            {
+                _trace.TotalMs = sw.ElapsedMilliseconds;
+                _chatLogQueue.Enqueue(_trace);
             }
 
         }
@@ -193,6 +210,8 @@ namespace AiService.Controllers
         public class ChatMessage
         {
             public string Text { get; set; }
+            public string? UserId { get; set; }
+            public string? Channel { get; set; }    // "text" | "voice"
         }
 
         public class SpeakRequest

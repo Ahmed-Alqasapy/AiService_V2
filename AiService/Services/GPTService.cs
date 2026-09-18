@@ -20,16 +20,21 @@ namespace AiService.Services
         private readonly EmbeddingService _embeddingService;
         private readonly HttpClient _ollama;
         private readonly ContextOptimizer _compressor = new ContextOptimizer();
+        private readonly ChatTrace _trace;
 
 
         public record ContextPart(string Content, string SourceType, UnifiedSearchResult? Result = null);
+        private static readonly string[] NoInfoPhrases =
+            { "لا توجد معلومات", "لم يتم العثور", "لا تتوفر معلومات", "غير متوفر في الوثائق", "I don't have information" };
+
         public GPTService(
-           
+
             OpenAIService aiProvider,
             MyDbContext db,
             ILogger<GPTService> logger,
             IMemoryCache cache,
-            EmbeddingService embeddingService, IHttpClientFactory httpClientFactory)
+            EmbeddingService embeddingService, IHttpClientFactory httpClientFactory, ChatTrace trace,
+            IConfiguration configuration)
         {
             _aiProvider = aiProvider;
             _db = db;
@@ -38,7 +43,10 @@ namespace AiService.Services
             _embeddingService = embeddingService;
             _ollama = httpClientFactory.CreateClient();
             _ollama.BaseAddress = new Uri("http://10.21.2.143:11434/api/");
+            _trace = trace;
+            _lowConfidenceThreshold = configuration.GetValue<float?>("Admin:LowConfidenceThreshold") ?? 0.30f;
         }
+        private readonly float _lowConfidenceThreshold;
 
 
         #region For ChatHUB_SIGNALR
@@ -151,28 +159,49 @@ namespace AiService.Services
                 _logger.LogInformation("Processing: {Message}", userMessage);
 
                 var (intent, parameters) = await ParseQuery(userMessage);
+                _trace.Intent = intent;
 
                 if (intent == "greeting")
                 {
+                    _trace.Status = "Greeting";
                     return "مرحبًا بكم! يمكنكم الاستفسار عن التراخيص، الشركات، المُلّاك، أو الالتزام بالأنظمة.";
                 }
 
+                var swSearch = System.Diagnostics.Stopwatch.StartNew();
                 var contextParts = await RetrieveUnifiedContextAsync(userMessage, intent, parameters);
-
-                if (!contextParts.Any())
-                {
-                    return "لا توجد معلومات كافية للإجابة على هذا السؤال.";
-                }
+                swSearch.Stop();
+                _trace.SearchMs = swSearch.ElapsedMilliseconds;
 
                 // Separate contexts by type
                 var fileContexts = contextParts.Where(p => p.SourceType == "file").ToList();
                 var dbContexts = contextParts.Where(p => p.SourceType == "db").ToList();
 
+                _trace.FileHits = fileContexts.Count;
+                _trace.DbHits = dbContexts.Count;
+                _trace.TopScore = contextParts.Where(p => p.Result != null)
+                    .Select(p => (float?)p.Result!.Score)
+                    .Max();
+                foreach (var part in contextParts.Where(p => p.Result != null).Take(10))
+                    _trace.Sources.Add(new { part.SourceType, part.Result!.FileName, part.Result.Page, part.Result.EntityId, part.Result.Score });
+
+                // RetrieveUnifiedContextAsync always returns at least one "none" part when
+                // nothing relevant was found, so `!contextParts.Any()` never fires. Detect
+                // "no context" by the real file/db hit counts instead.
+                if (fileContexts.Count + dbContexts.Count == 0)
+                {
+                    _trace.Status = "NoContext";
+                    return "لا توجد معلومات كافية للإجابة على هذا السؤال.";
+                }
+                if (_trace.TopScore.HasValue && _trace.TopScore.Value < _lowConfidenceThreshold)
+                {
+                    _trace.Status = "LowConfidence";
+                }
+
 
                 #region Determine Priority of DB Or Files
                 // Determine priority
                 //bool hasFile = fileContexts.Any();
-                //var dominantSource = hasFile ? "file" : (dbContexts.Any() ? "db" : "none"); 
+                //var dominantSource = hasFile ? "file" : (dbContexts.Any() ? "db" : "none");
                 #endregion
 
 
@@ -254,12 +283,17 @@ namespace AiService.Services
 
                 response = PostProcessResponse(response);
 
+                if (_trace.Status == "Answered" && NoInfoPhrases.Any(p => response.Contains(p)))
+                    _trace.Status = "ModelNoInfo";
+
                 return response;
 
 
             }
             catch (Exception ex)
             {
+                _trace.Status = "Error";
+                _trace.Error = ex.Message;
                 _logger.LogError(ex, "Error in ProcessMessage");
                 return "عذراً، حدث خطأ أثناء معالجة السؤال. الرجاء المحاولة مرة أخرى.";
             }
