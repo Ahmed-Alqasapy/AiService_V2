@@ -156,10 +156,10 @@ namespace AiService
             builder.Services.AddSingleton<TtsServerLauncher>();
             builder.Services.AddHostedService(sp => sp.GetRequiredService<TtsServerLauncher>());
 
-            // Speech-to-text: stt_server.py (whisper-large-v3-turbo-arabic-dialectal) for the chat voice button
+            // Speech-to-text for the chat voice button: Stt:Active picks Whisper (stt_server.py) or Audar (stt_server_audar.py)
             builder.Services.AddHttpClient<SttService>(client =>
             {
-                client.BaseAddress = new Uri(builder.Configuration["Stt:BaseUrl"] ?? "http://127.0.0.1:8011/");
+                client.BaseAddress = new Uri(PythonServerLauncher.Setting(builder.Configuration, "Stt", "BaseUrl") ?? "http://127.0.0.1:8011/");
                 client.Timeout = TimeSpan.FromMinutes(2);
             });
             builder.Services.AddSingleton<SttServerLauncher>();

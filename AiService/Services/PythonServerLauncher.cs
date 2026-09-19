@@ -34,7 +34,21 @@ namespace AiService.Services
         protected abstract string PortEnvVar { get; }
         protected abstract string ModelDirEnvVar { get; }
 
-        private string BaseUrl => _config[$"{Section}:BaseUrl"] ?? DefaultBaseUrl;
+        /// <summary>
+        /// Reads {section}:Models:{Active}:{name} when the section has an Active model, otherwise
+        /// (or when that model doesn't set it) {section}:{name}. Stt uses this to switch between
+        /// Whisper and Audar with one word; Tts has no Active and reads its flat keys as before.
+        /// </summary>
+        public static string? Setting(IConfiguration config, string section, string name)
+        {
+            var active = config[$"{section}:Active"];
+            var value = string.IsNullOrWhiteSpace(active) ? null : config[$"{section}:Models:{active}:{name}"];
+            return string.IsNullOrWhiteSpace(value) ? config[$"{section}:{name}"] : value;
+        }
+
+        private string? Setting(string name) => Setting(_config, Section, name);
+
+        private string BaseUrl => Setting("BaseUrl") ?? DefaultBaseUrl;
         private string Name => Section.ToUpperInvariant();
 
         public Task StartAsync(CancellationToken ct)
@@ -88,7 +102,7 @@ namespace AiService.Services
             }
         }
 
-        private string ScriptPath => Path.Combine(_env.ContentRootPath, ScriptName);
+        private string ScriptPath => Path.Combine(_env.ContentRootPath, Setting("Script") is { Length: > 0 } s ? s : ScriptName);
         private string LogPath => Path.ChangeExtension(ScriptPath, ".log");
 
         private bool TryStartProcess()
@@ -101,7 +115,7 @@ namespace AiService.Services
 
             var psi = new ProcessStartInfo
             {
-                FileName = _config[$"{Section}:PythonPath"] ?? @"C:\Python313\python.exe",
+                FileName = Setting("PythonPath") ?? @"C:\Python313\python.exe",
                 Arguments = $"\"{ScriptPath}\"",
                 WorkingDirectory = _env.ContentRootPath,
                 UseShellExecute = false,
@@ -112,7 +126,7 @@ namespace AiService.Services
             psi.Environment["PYTHONIOENCODING"] = "utf-8";
             psi.Environment["PYTHONUNBUFFERED"] = "1";
             psi.Environment[PortEnvVar] = new Uri(BaseUrl).Port.ToString();
-            if (_config[$"{Section}:ModelDir"] is { Length: > 0 } modelDir)
+            if (Setting("ModelDir") is { Length: > 0 } modelDir)
                 psi.Environment[ModelDirEnvVar] = modelDir;
 
             try
@@ -134,7 +148,8 @@ namespace AiService.Services
                 _process.ErrorDataReceived += (_, e) => Write(e.Data);
                 _process.BeginOutputReadLine();
                 _process.BeginErrorReadLine();
-                _logger.LogInformation("Started {Name} server (pid {Pid}), log: {Log}", Name, _process.Id, LogPath);
+                _logger.LogInformation("Started {Name} server {Script} (pid {Pid}) at {Url}, log: {Log}",
+                    Name, Path.GetFileName(ScriptPath), _process.Id, BaseUrl, LogPath);
                 return true;
             }
             catch (Exception ex)
@@ -184,7 +199,8 @@ namespace AiService.Services
         protected override string ModelDirEnvVar => "NABRA_DIR";
     }
 
-    /// <summary>stt_server.py (whisper-large-v3-turbo-arabic-dialectal).</summary>
+    /// <summary>stt_server.py (whisper-large-v3-turbo-arabic-dialectal), or stt_server_audar.py
+    /// (Audar-ASR-V1-Flash via llama.cpp), picked by Stt:Active.</summary>
     public class SttServerLauncher : PythonServerLauncher
     {
         public SttServerLauncher(IConfiguration config, IWebHostEnvironment env, ILogger<SttServerLauncher> logger)

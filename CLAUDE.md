@@ -40,7 +40,22 @@ payload, which is why the chunker puts the section into `Text` itself.
 UI flow: voice button records -> `POST /api/Chat/Transcribe` (multipart `file`) -> `{text}` into
 chat box -> `POST /api/Chat/ChatWithRAG` -> optional `SpeakPrepare` for audio.
 
-- `stt_server.py` (port 8011, `Stt` section in appsettings): Whisper fine-tune
+- **Active STT since 2026-09-18: `stt_server_audar.py` (port 8013)**. `Stt:Active` in appsettings
+  (`Audar` | `Whisper`) picks an entry under `Stt:Models` (Script, BaseUrl, ModelDir); restart the
+  API to switch. `PythonServerLauncher.Setting()` resolves `Models:<Active>:<key>`, then the flat
+  `Stt:<key>` (Tts has no Active and uses flat keys). Which one runs: GET :8013/health or :8011/health,
+  or the `Started STT server <script>` log line. Both verified through the API. Model `C:\Work\PROJECTS\audaraiAudar_ASR_V1_Flash`: Audar-ASR-V1-Flash GGUF
+  (0.6B Qwen3 decoder + `mmproj` audio encoder, projector `qwen3a`). No torch/transformers: the
+  script starts `llama-server.exe` from `C:\Work\PROJECTS\llama.cpp-b11042` (official CPU build)
+  on internal port 8014, and restarts it if it dies (on /transcribe or /health). Output `language Arabic<asr_text>...` is stripped.
+  Measured on the same 4 TTS clips: ready in 3-5 s, **2.3 GB RAM**, 0.65-0.95 s per clip (Whisper
+  6-9 s), 45 s audio in 8 s. Errors: `كم الحد`->`كما الحب`, `الترخيص`->`الترفيهي` (short clips;
+  the same sentences came out right inside longer audio). Q4_K_M is ~2x faster, 0.5 GB less, and
+  worse (`الأضمن`, `رصوم`), so BF16 is the default (`STT_GGUF` to change). Windows of 26-29 s
+  skipped whole sentences, 20 s did not, so audio is cut at 20 s on the quietest 100 ms.
+  Noise -> `Thank you.` (hallucination, not filtered); `(Laughter)` tags are stripped.
+  Verified through the API: wav, webm/opus, auto-start, restart after kill.
+- `stt_server.py` (port 8011, previous STT, code kept): Whisper fine-tune
   `C:\Work\PROJECTS\WASFYSPEECH\whisper-large-v3-turbo-arabic-dialectal` (809M, card WER 0.344).
   Replaced wav2vec2 `arabic_speech_to_text` (folder deleted) on 2026-09-14. Persistent server;
   PyAV decodes webm/opus (no ffmpeg.exe). Max 120 s; >30 s uses Whisper long-form with
