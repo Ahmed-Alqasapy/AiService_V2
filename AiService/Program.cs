@@ -4,6 +4,7 @@ using AiService.Models;
 using AiService.Services;
 using DevExpress.Entity.Model.Metadata;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Newtonsoft.Json;
 using NPOI.XWPF.UserModel;
 using Polly;
@@ -183,7 +184,7 @@ namespace AiService
             {
                 client.BaseAddress = new Uri("https://api.jina.ai/v1/");
                 client.DefaultRequestHeaders.Authorization =
-                    new AuthenticationHeaderValue("Bearer", "jina_46ee206d6ad7419aa362f17ffcc9727atVXQHOIuZceP1egMS_bRpL6-vvXS");
+                    new AuthenticationHeaderValue("Bearer", builder.Configuration.GetSection("JINAKEY")["KEY"]);
                 client.DefaultRequestHeaders.Add("Accept", "application/json");
             });
 
